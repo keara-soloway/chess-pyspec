@@ -3,7 +3,7 @@ import re
 import threading
 import weakref
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable, Literal, overload, Dict, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, Literal, Optional, overload
 
 import numpy as np
 from pyee.asyncio import AsyncIOEventEmitter
@@ -397,6 +397,7 @@ class ClientConnection(
             if (match := move_done_pattern.match(name)) is None:
                 return
             motor_name = match.group(1)
+
             # Here we are comparing the value of the move_done property to 0,
             # which is the value it should be set to when a move is completed.
             if motor_name in waiting_for and value == 0:
@@ -404,7 +405,13 @@ class ClientConnection(
                     "move_done received for `%s` during synchronized motion.",
                     motor_name,
                 )
-                waiting_for[motor_name].set_result(True)
+                if not waiting_for[motor_name].done():
+                    waiting_for[motor_name].set_result(True)
+                else:
+                    self.logger.warning(
+                        "Received duplicate move_done event for `%s` during synchronized motion.",
+                        motor_name,
+                    )
 
         motion_started = False
         try:
