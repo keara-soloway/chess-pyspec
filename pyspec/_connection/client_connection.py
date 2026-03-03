@@ -199,33 +199,24 @@ class ClientConnection(
         response = asyncio.Future()
 
         def set_response(data: DataType) -> None:
-            if not response.done():
+            if response.done():
+                return
+
+            if isinstance(data, ErrorStr):
+                self.logger.error(
+                    "Received ERROR reply for sequence number %d",
+                    sequence_number,
+                )
+                error_message = data if isinstance(data, str) else "Unknown error"
+                response.set_exception(
+                    RemoteException(f"Error from server: {error_message}")
+                )
+            else:
                 response.set_result(data)
 
         self.once(f"reply-{sequence_number}", set_response)
         await self._send(header, data)
-
-        try:
-            msg_data: DataType = await response
-        except (
-            asyncio.CancelledError,
-            asyncio.TimeoutError,
-            KeyboardInterrupt,
-            SystemExit,
-        ):
-            # If we are interrupting the client while
-            # waiting for a reply, we should send an abort message to the server
-            await self.abort()
-            raise
-
-        if isinstance(msg_data, ErrorStr):
-            self.logger.error(
-                "Received ERROR reply for sequence number %d",
-                sequence_number,
-            )
-            error_message = msg_data if isinstance(msg_data, str) else "Unknown error"
-            raise RemoteException(f"Error from server: {error_message}")
-        return msg_data
+        return await response
 
     async def prop_get(self, prop: str) -> DataType:
         """
@@ -299,6 +290,17 @@ class ClientConnection(
         """
         await self._send(Header(Command.ABORT))
 
+    @asynccontextmanager
+    async def _abort_on_interrupt(self):
+        """
+        Context manager to automatically abort the current command on the remote host if an interrupt signal is received.
+        """
+        try:
+            yield
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            await self.abort()
+            raise
+
     async def remote_cmd_no_return(self, cmd: str) -> None:
         """
         Puts the spec command on the execution queue of the remote host.
@@ -319,7 +321,11 @@ class ClientConnection(
         Returns:
             DataType: The result of the command execution from the remote host.
         """
-        return await self._send_with_reply(Header(Command.CMD_WITH_RETURN), data=cmd)
+
+        async with self._abort_on_interrupt():
+            return await self._send_with_reply(
+                Header(Command.CMD_WITH_RETURN), data=cmd
+            )
 
     async def remote_func_no_return(self, func: str, *args) -> None:
         """
@@ -345,9 +351,10 @@ class ClientConnection(
             DataType: The result of the function execution from the remote host.
         """
         func_string = f"{func}(" + ", ".join(repr(arg) for arg in args) + ")"
-        return await self._send_with_reply(
-            Header(Command.FUNC_WITH_RETURN), data=func_string
-        )
+        async with self._abort_on_interrupt():
+            return await self._send_with_reply(
+                Header(Command.FUNC_WITH_RETURN), data=func_string
+            )
 
     async def hello(self, *, timeout: float = 5.0):
         """
