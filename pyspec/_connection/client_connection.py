@@ -391,6 +391,7 @@ class ClientConnection(
 
         move_done_pattern = re.compile(r"motor/(.+)/move_done")
 
+        move_started: dict[str, bool] = {}
         waiting_for: dict[str, asyncio.Future] = {}
 
         def motor_move_done_check(name: str, value: DataType) -> None:
@@ -398,20 +399,24 @@ class ClientConnection(
                 return
             motor_name = match.group(1)
 
-            # Here we are comparing the value of the move_done property to 0,
-            # which is the value it should be set to when a move is completed.
-            if motor_name in waiting_for and value == 0:
+            if motor_name in waiting_for:
+                if value:
+                    # Look for if we have started a movement (move_done == True)
+                    move_started[motor_name] = True
+                elif move_started.get(motor_name, False):
+                    # If we have started one for this motor, then we look for a subsequent move_done == False,
+                    # which indicates the movement is complete.
+                    #
+                    # This latching system is so that we don't get confused since the motor typically
+                    # starts with move_done == False, and if we just look for the first move_done == False,
+                    # we might mistakenly think the motor has completed its movement before it even starts.
+                    waiting_for[motor_name].set_result(True)
+
                 self.logger.info(
-                    "move_done received for `%s` during synchronized motion.",
+                    "move_done=`%s` received for `%s` during synchronized motion.",
+                    value,
                     motor_name,
                 )
-                if not waiting_for[motor_name].done():
-                    waiting_for[motor_name].set_result(True)
-                else:
-                    self.logger.warning(
-                        "Received duplicate move_done event for `%s` during synchronized motion.",
-                        motor_name,
-                    )
 
         motion_started = False
         try:
