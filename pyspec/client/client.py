@@ -145,6 +145,30 @@ class Client(PropertyGroup):
         """
         Call a remote function on the server.
 
+        If this task raises an exception (e.g. due to a timeout),
+        the client will send an abort message to the server to stop the execution of the remote function.
+
+        A timeout can be enforced with the following patterns:
+
+        .. code-block:: python
+
+            # Pattern 1: Using asyncio.wait_for
+            try:
+                result = await asyncio.wait_for(
+                    client.call("function_name", arg1, arg2),
+                    timeout=5.0,  # seconds
+                )
+            except asyncio.TimeoutError:
+                print("Remote function call timed out.")
+
+
+            # Pattern 2 (Python 3.11+): Using asyncio.timeout
+            try:
+                with asyncio.timeout(5.0):  # seconds
+                    result = await client.call("function_name", arg1, arg2)
+            except asyncio.TimeoutError:
+                print("Remote function call timed out.")
+
         Args:
             function_name (str): The name of the remote function to call.
             *args (str | float | int): The arguments to pass to the remote function.
@@ -156,6 +180,31 @@ class Client(PropertyGroup):
     async def exec(self, command: str) -> DataType:
         """
         Execute a command on the server.
+
+
+        If this task raises an exception (e.g. due to a timeout),
+        the client will send an abort message to the server to stop the execution of the remote function.
+
+        A timeout can be enforced with the following patterns:
+
+        .. code-block:: python
+
+            # Pattern 1: Using asyncio.wait_for
+            try:
+                result = await asyncio.wait_for(
+                    client.call("function_name", arg1, arg2),
+                    timeout=5.0,  # seconds
+                )
+            except asyncio.TimeoutError:
+                print("Remote function call timed out.")
+
+
+            # Pattern 2 (Python 3.11+): Using asyncio.timeout
+            try:
+                with asyncio.timeout(5.0):  # seconds
+                    result = await client.call("function_name", arg1, arg2)
+            except asyncio.TimeoutError:
+                print("Remote function call timed out.")
 
         Args:
             command (str): The command to execute.

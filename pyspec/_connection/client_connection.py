@@ -3,7 +3,7 @@ import re
 import threading
 import weakref
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable, Literal, overload, Dict, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, Literal, Optional, overload
 
 import numpy as np
 from pyee.asyncio import AsyncIOEventEmitter
@@ -198,23 +198,25 @@ class ClientConnection(
         header.sequence_number = sequence_number
         response = asyncio.Future()
 
-        self.once(f"reply-{sequence_number}", response.set_result)
+        def set_response(data: DataType) -> None:
+            if response.done():
+                return
+
+            if isinstance(data, ErrorStr):
+                self.logger.error(
+                    "Received ERROR reply for sequence number %d",
+                    sequence_number,
+                )
+                error_message = data if isinstance(data, str) else "Unknown error"
+                response.set_exception(
+                    RemoteException(f"Error from server: {error_message}")
+                )
+            else:
+                response.set_result(data)
+
+        self.once(f"reply-{sequence_number}", set_response)
         await self._send(header, data)
-
-        try:
-            msg_data: DataType = await response
-        except KeyboardInterrupt:
-            await self.abort()
-            raise
-
-        if isinstance(msg_data, ErrorStr):
-            self.logger.error(
-                "Received ERROR reply for sequence number %d",
-                sequence_number,
-            )
-            error_message = msg_data if isinstance(msg_data, str) else "Unknown error"
-            raise RemoteException(f"Error from server: {error_message}")
-        return msg_data
+        return await response
 
     async def prop_get(self, prop: str) -> DataType:
         """
@@ -288,6 +290,17 @@ class ClientConnection(
         """
         await self._send(Header(Command.ABORT))
 
+    @asynccontextmanager
+    async def _abort_on_interrupt(self):
+        """
+        Context manager to automatically abort the current command on the remote host if an interrupt signal is received.
+        """
+        try:
+            yield
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            await self.abort()
+            raise
+
     async def remote_cmd_no_return(self, cmd: str) -> None:
         """
         Puts the spec command on the execution queue of the remote host.
@@ -308,7 +321,11 @@ class ClientConnection(
         Returns:
             DataType: The result of the command execution from the remote host.
         """
-        return await self._send_with_reply(Header(Command.CMD_WITH_RETURN), data=cmd)
+
+        async with self._abort_on_interrupt():
+            return await self._send_with_reply(
+                Header(Command.CMD_WITH_RETURN), data=cmd
+            )
 
     async def remote_func_no_return(self, func: str, *args) -> None:
         """
@@ -334,9 +351,10 @@ class ClientConnection(
             DataType: The result of the function execution from the remote host.
         """
         func_string = f"{func}(" + ", ".join(repr(arg) for arg in args) + ")"
-        return await self._send_with_reply(
-            Header(Command.FUNC_WITH_RETURN), data=func_string
-        )
+        async with self._abort_on_interrupt():
+            return await self._send_with_reply(
+                Header(Command.FUNC_WITH_RETURN), data=func_string
+            )
 
     async def hello(self, *, timeout: float = 5.0):
         """
@@ -391,20 +409,32 @@ class ClientConnection(
 
         move_done_pattern = re.compile(r"motor/(.+)/move_done")
 
+        move_started: dict[str, bool] = {}
         waiting_for: dict[str, asyncio.Future] = {}
 
         def motor_move_done_check(name: str, value: DataType) -> None:
             if (match := move_done_pattern.match(name)) is None:
                 return
             motor_name = match.group(1)
-            # Here we are comparing the value of the move_done property to 0,
-            # which is the value it should be set to when a move is completed.
-            if motor_name in waiting_for and value == 0:
+
+            if motor_name in waiting_for:
+                if value:
+                    # Look for if we have started a movement (move_done == True)
+                    move_started[motor_name] = True
+                elif move_started.get(motor_name, False):
+                    # If we have started one for this motor, then we look for a subsequent move_done == False,
+                    # which indicates the movement is complete.
+                    #
+                    # This latching system is so that we don't get confused since the motor typically
+                    # starts with move_done == False, and if we just look for the first move_done == False,
+                    # we might mistakenly think the motor has completed its movement before it even starts.
+                    waiting_for[motor_name].set_result(True)
+
                 self.logger.info(
-                    "move_done received for `%s` during synchronized motion.",
+                    "move_done=`%s` received for `%s` during synchronized motion.",
+                    value,
                     motor_name,
                 )
-                waiting_for[motor_name].set_result(True)
 
         motion_started = False
         try:
