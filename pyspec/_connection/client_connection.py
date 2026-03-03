@@ -213,7 +213,7 @@ class ClientConnection(
                     sequence_number,
                     exc_info=e,
                 )
-            # If an exception (i.e. asyncio.TimeoutError) occurs while waiting for the reply,
+            # If an exception (i.e. asyncio.CancelledError / TimeoutError) occurs while waiting for the reply,
             # we should send a message to the server to abort the command.
             await self.abort()
             raise
